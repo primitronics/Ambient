@@ -32,62 +32,200 @@
   </div>
   <script src="https://unpkg.com/tone@latest/build/Tone.js"></script>
   <script>
-    const scales={aeolian:[0,2,3,5,7,8,10], dorian:[0,2,3,5,7,9,10], lydian:[0,2,4,6,7,9,11]};
-    const SCENES=[
-      {name:"Shinjuku Haze",bpm:84,scale:"aeolian",root:57},
-      {name:"Neon Rain",bpm:98,scale:"lydian",root:60}
-    ];
-    const state={scene:0,intensity:0.4,melVol:0.5};
-    let master, pad, melody, bass, padPart, melodyPart, bassPart;
+  // ===== helpers =====
+  const clamp=(v,min,max)=>Math.min(max,Math.max(min,v));
+  const lerp=(a,b,t)=>a+(b-a)*t;
+  const rnd=(a,b)=>a+Math.random()*(b-a);
 
-    function init(){
-      master=new Tone.Gain(0.9).toDestination();
-      pad=new Tone.PolySynth(Tone.AMSynth,{envelope:{attack:2,release:3},volume:-10}).connect(master);
-      melody=new Tone.Synth({oscillator:{type:"sine"},envelope:{attack:0.05,release:0.2}}).connect(new Tone.Gain(state.melVol).connect(master));
-      bass=new Tone.MonoSynth({oscillator:{type:"triangle"},filter:{type:"lowpass",frequency:200},envelope:{attack:0.1,release:0.5}}).connect(master);
+  const scales={
+    aeolian:[0,2,3,5,7,8,10],
+    dorian:[0,2,3,5,7,9,10],
+    lydian:[0,2,4,6,7,9,11]
+  };
+  const SCENES=[
+    {name:"Shinjuku Haze",bpm:84,scale:"aeolian",root:57},
+    {name:"Neon Rain",bpm:98,scale:"lydian",root:60}
+  ];
+  const state={scene:0, intensity:.5};
+
+  // ===== audio graph =====
+  let master, comp, limit, rev, dly;
+  let pad, bass, mel, melGain;
+  let padPart, bassPart, melPart, hatPart, kickPart, snPart;
+
+  function init() {
+    master = new Tone.Gain(0.9);
+    comp   = new Tone.Compressor({threshold:-18, ratio:3});
+    limit  = new Tone.Limiter(-1);
+    rev    = new Tone.Reverb({decay:8, preDelay:0.05, wet:0.25});
+    dly    = new Tone.PingPongDelay({delayTime:"8n", feedback:0.35, wet:0.2});
+
+    master.chain(rev, dly, comp, limit, Tone.Destination);
+
+    pad  = new Tone.PolySynth(Tone.AMSynth,{
+      envelope:{attack:1.8,decay:.5,sustain:.6,release:3.2},
+      maxPolyphony:8, volume:-10
+    }).connect(master);
+
+    bass = new Tone.MonoSynth({
+      oscillator:{type:"triangle"},
+      filter:{type:"lowpass", frequency:180, rolloff:-24},
+      envelope:{attack:0.02, decay:0.15, sustain:0.6, release:0.4}
+    }).connect(master);
+
+    // ★メロディは専用のゲインノードで音量調整（dBではなく0–1のゲイン）
+    melGain = new Tone.Gain(0.7).connect(master);
+    mel = new Tone.Synth({
+      oscillator:{type:"sine"},
+      envelope:{attack:0.01, decay:0.1, sustain:0.4, release:0.25}
+    }).connect(melGain);
+  }
+
+  // ユークラディアン・パターン（ドラム用）
+  function euclid(steps, pulses){
+    const pattern = Array(steps).fill(0).map((_,i)=> i< pulses ? 1 : 0);
+    // 簡易シャッフル
+    for(let i=pattern.length-1;i>0;i--){
+      const j = Math.floor(Math.random()*(i+1));
+      [pattern[i],pattern[j]]=[pattern[j],pattern[i]];
+    }
+    return pattern;
+  }
+
+  function build(sc){
+    // 既存パート停止/破棄
+    [padPart, bassPart, melPart, hatPart, kickPart, snPart].forEach(p=>{
+      if(p){ p.stop(); p.dispose(); }
+    });
+
+    const scale = scales[sc.scale];
+
+    // ---- PAD（和音の雲）----
+    const chordDegrees = [0,3,4,6];
+    padPart = new Tone.Part((time)=>{
+      const deg = chordDegrees[Math.floor(Math.random()*chordDegrees.length)];
+      const oct = Math.random()<0.4 ? 1 : 0;
+      const midi = sc.root + 12*oct + scale[deg%scale.length];
+      pad.triggerAttackRelease(Tone.Frequency(midi,"midi"), "2n", time, lerp(0.25,0.7,state.intensity));
+    }, []).start(0);
+    padPart.loop = true; padPart.loopEnd = "2m";
+    // 各拍で鳴るように軽くスケジュール
+    for(let i=0;i<8;i++){ padPart.add(`0:${i}:0`); }
+
+    // ---- BASS（ルート中心に少し動く）----
+    bassPart = new Tone.Part((time, ev)=>{
+      const deg = ev.deg;
+      const midi = sc.root - 12 + scale[(deg+scale.length)%scale.length];
+      bass.triggerAttackRelease(Tone.Frequency(midi,"midi"), "4n", time, 0.6);
+    }, []).start(0);
+    bassPart.loop = true; bassPart.loopEnd = "2m";
+    const bassSeq = [0,0,5,0, 0,0,2,0]; // たまにサブドミや五度へ
+    bassSeq.forEach((deg,i)=> bassPart.add([`0:${i}:0`, {deg}]));
+
+    // ---- MELODY（ランダムウォーク＋休符＋終止）----
+    // ・基本は8分で動く
+    // ・1〜2度のランダムウォークにバイアス、時々跳躍
+    // ・小節末はトニック/コードトーンへ解決しやすく
+    let mDeg = 0; // 相対ディグリー
+    const preferChord = new Set(chordDegrees.map(d=> d%scale.length));
+    melPart = new Tone.Part((time, ev)=>{
+      if(ev.rest){ return; }
+      const deg = ((ev.deg%scale.length)+scale.length)%scale.length;
+      const midi = sc.root + 12 + scale[deg];
+      const vel = ev.accent ? 0.9 : 0.7;
+      mel.triggerAttackRelease(Tone.Frequency(midi,"midi"), ev.len, time, vel);
+    }, []).start(0);
+    melPart.loop = true; melPart.loopEnd = "2m";
+
+    for(let step=0; step<16; step++){
+      const bar = Math.floor(step/4);
+      const pos = `0:${Math.floor(step/4)}:${(step%4)*2}`; // 8分
+      // 休符確率（疎密をつくる）
+      const rest = Math.random() < (step%4===1 ? 0.15 : 0.1);
+      // ランダムウォーク（±1 or ±2を高確率、たまに±5で跳躍）
+      const hop = Math.random()<0.12 ? (Math.random()<0.5?+5:-5)
+                 : (Math.random()<0.75 ? (Math.random()<0.5?+1:-1)
+                                        : (Math.random()<0.5?+2:-2));
+      mDeg += hop;
+
+      // 小節末は解決（トニック/和声音に寄せる）
+      if(step%4===3){
+        // chord toneへ引き寄せ
+        const candidates = [...preferChord];
+        const target = candidates[Math.floor(Math.random()*candidates.length)];
+        // 近い方へ移動
+        const diff1 = ((target - (mDeg%scale.length))+scale.length)%scale.length;
+        const diff2 = -(( (mDeg%scale.length) - target + scale.length)%scale.length);
+        mDeg += Math.abs(diff1) < Math.abs(diff2) ? diff1 : diff2;
+      }
+
+      const accent = (step%8===0);
+      melPart.add([pos, {deg:mDeg, len:"8n", rest, accent}]);
     }
 
-    function build(sc){
-      if(padPart) padPart.dispose();
-      if(melodyPart) melodyPart.dispose();
-      if(bassPart) bassPart.dispose();
-      const scale=scales[sc.scale];
-      padPart=new Tone.Loop(time=>{
-        const note=sc.root+scale[Math.floor(Math.random()*scale.length)];
-        pad.triggerAttackRelease(Tone.Frequency(note,"midi"),"2n",time);
-      },"1n").start(0);
-      melodyPart=new Tone.Loop(time=>{
-        const note=sc.root+12+scale[Math.floor(Math.random()*scale.length)];
-        melody.triggerAttackRelease(Tone.Frequency(note,"midi"),"8n",time);
-      },"4n").start(0);
-      bassPart=new Tone.Loop(time=>{
-        const note=sc.root-12+scale[Math.floor(Math.random()*scale.length)];
-        bass.triggerAttackRelease(Tone.Frequency(note,"midi"),"1n",time);
-      },"2n").start(0);
-    }
+    // ---- DRUMS（変化するユークラディアン）----
+    const hatEu = euclid(16, 9 + Math.floor(rnd(-1,2))); // 9±
+    hatPart = new Tone.Part((time)=> {
+      // ノイズハットを簡易実装
+      const hat = new Tone.NoiseSynth({envelope:{attack:0.001, decay:0.05, sustain:0}})
+        .connect(new Tone.Gain(0.12).connect(master));
+      hat.triggerAttackRelease("16n", time);
+      setTimeout(()=>hat.dispose(), 100); // メモリ節約
+    }, []).start(0);
+    hatPart.loop = true; hatPart.loopEnd = "1m";
+    hatEu.forEach((on,i)=> { if(on) hatPart.add(`0:0:${i}`); });
 
-    document.getElementById('start').onclick=async()=>{
-      if(!master) init();
-      await Tone.start();
-      Tone.Transport.bpm.value=SCENES[state.scene].bpm;
-      build(SCENES[state.scene]);
-      Tone.Transport.start();
-    };
-    document.getElementById('stop').onclick=()=>Tone.Transport.stop();
-    document.getElementById('next').onclick=()=>{
-      state.scene=(state.scene+1)%SCENES.length;
-      build(SCENES[state.scene]);
-    };
+    kickPart = new Tone.Part((time)=> {
+      const k = new Tone.MembraneSynth({pitchDecay:0.02, octaves:6})
+        .connect(new Tone.Gain(0.3).connect(master));
+      k.triggerAttackRelease("C1","8n",time);
+      setTimeout(()=>k.dispose(), 120);
+    }, []).start(0);
+    kickPart.loop = true; kickPart.loopEnd = "1m";
+    [0,8].forEach(i=> kickPart.add(`0:0:${i}`)); // 1拍目＋3拍目基礎
+    if(Math.random()<0.6) kickPart.add("0:0:12"); // ゴースト
 
-    document.getElementById('intensity').oninput=e=>{
-      state.intensity=parseFloat(e.target.value);
-      document.getElementById('vi').textContent=state.intensity.toFixed(2);
-    };
-    document.getElementById('melVol').oninput=e=>{
-      state.melVol=parseFloat(e.target.value);
-      melody.volume.value=Tone.gainToDb(state.melVol);
-      document.getElementById('vm').textContent=state.melVol.toFixed(2);
-    };
-  </script>
+    snPart = new Tone.Part((time)=> {
+      const s = new Tone.NoiseSynth({noise:{type:"pink"}, envelope:{attack:0.001, decay:0.15, sustain:0}})
+        .connect(new Tone.Gain(0.18).connect(master));
+      s.triggerAttackRelease("8n", time);
+      setTimeout(()=>s.dispose(), 120);
+    }, []).start(0);
+    snPart.loop = true; snPart.loopEnd = "1m";
+    [4,12].forEach(i=> snPart.add(`0:0:${i}`)); // 2拍4拍
+    if(Math.random()<0.4) snPart.add("0:0:3");  // たまに前詰め
+  }
+
+  // ===== UI wiring =====
+  const $ = id => document.getElementById(id);
+  $("start").onclick = async ()=>{
+    if(!master) init();
+    await Tone.start();
+    const sc = SCENES[state.scene];
+    Tone.Transport.bpm.rampTo(sc.bpm, 0.1);
+    build(sc);
+    Tone.Transport.start();
+  };
+  $("stop").onclick = ()=> Tone.Transport.stop();
+  $("next").onclick = ()=>{
+    state.scene = (state.scene+1)%SCENES.length;
+    const sc = SCENES[state.scene];
+    Tone.Transport.bpm.rampTo(sc.bpm, 0.2);
+    build(sc);
+  };
+  $("intensity").oninput = e=>{
+    state.intensity = parseFloat(e.target.value);
+    document.getElementById("vi").textContent = state.intensity.toFixed(2);
+    // ざっくり質感連動
+    rev.wet.rampTo(lerp(0.15,0.5,state.intensity), 0.3);
+    dly.wet.rampTo(lerp(0.1,0.35,state.intensity), 0.3);
+    melGain.gain.rampTo(lerp(0.5,0.9,state.intensity), 0.2);
+  };
+  $("melVol").oninput = e=>{
+    const v = parseFloat(e.target.value);
+    melGain.gain.rampTo(v, 0.1);  // ★dBではなくゲインで直接制御
+    document.getElementById("vm").textContent = v.toFixed(2);
+  };
+</script>
 </body>
 </html>
