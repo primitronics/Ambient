@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Ambient/IDM Live – with Melody</title>
+  <style>
+    body{margin:0;background:#0b0b0d;color:#e7e7ee;font-family:sans-serif}
+    .wrap{max-width:980px;margin:24px auto;padding:16px}
+    .row{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+    .card{background:#141418;border:1px solid #2a2a33;border-radius:16px;padding:16px;margin-bottom:12px}
+    button{background:#1e1e24;border:1px solid #2a2a33;color:#fff;padding:10px 14px;border-radius:12px;cursor:pointer}
+    button:hover{background:#25252d}
+    input[type=range]{width:min(320px,70vw)}
+    .val{font-size:12px;color:#a3a3b0;min-width:40px}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <div>Ambient/IDM Live – with Melody</div>
+      <div class="row" style="margin-top:8px">
+        <button id="start">Start</button>
+        <button id="stop">Stop</button>
+        <button id="next">Next Scene</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="row"><span>Intensity</span><input type="range" min="0" max="1" step="0.01" id="intensity"><span class="val" id="vi"></span></div>
+      <div class="row"><span>Melody Volume</span><input type="range" min="0" max="1" step="0.01" id="melVol" value="0.5"><span class="val" id="vm"></span></div>
+    </div>
+  </div>
+  <script src="https://unpkg.com/tone@latest/build/Tone.js"></script>
+  <script>
+    const scales={aeolian:[0,2,3,5,7,8,10], dorian:[0,2,3,5,7,9,10], lydian:[0,2,4,6,7,9,11]};
+    const SCENES=[
+      {name:"Shinjuku Haze",bpm:84,scale:"aeolian",root:57},
+      {name:"Neon Rain",bpm:98,scale:"lydian",root:60}
+    ];
+    const state={scene:0,intensity:0.4,melVol:0.5};
+    let master, pad, melody, bass, padPart, melodyPart, bassPart;
+
+    function init(){
+      master=new Tone.Gain(0.9).toDestination();
+      pad=new Tone.PolySynth(Tone.AMSynth,{envelope:{attack:2,release:3},volume:-10}).connect(master);
+      melody=new Tone.Synth({oscillator:{type:"sine"},envelope:{attack:0.05,release:0.2}}).connect(new Tone.Gain(state.melVol).connect(master));
+      bass=new Tone.MonoSynth({oscillator:{type:"triangle"},filter:{type:"lowpass",frequency:200},envelope:{attack:0.1,release:0.5}}).connect(master);
+    }
+
+    function build(sc){
+      if(padPart) padPart.dispose();
+      if(melodyPart) melodyPart.dispose();
+      if(bassPart) bassPart.dispose();
+      const scale=scales[sc.scale];
+      padPart=new Tone.Loop(time=>{
+        const note=sc.root+scale[Math.floor(Math.random()*scale.length)];
+        pad.triggerAttackRelease(Tone.Frequency(note,"midi"),"2n",time);
+      },"1n").start(0);
+      melodyPart=new Tone.Loop(time=>{
+        const note=sc.root+12+scale[Math.floor(Math.random()*scale.length)];
+        melody.triggerAttackRelease(Tone.Frequency(note,"midi"),"8n",time);
+      },"4n").start(0);
+      bassPart=new Tone.Loop(time=>{
+        const note=sc.root-12+scale[Math.floor(Math.random()*scale.length)];
+        bass.triggerAttackRelease(Tone.Frequency(note,"midi"),"1n",time);
+      },"2n").start(0);
+    }
+
+    document.getElementById('start').onclick=async()=>{
+      if(!master) init();
+      await Tone.start();
+      Tone.Transport.bpm.value=SCENES[state.scene].bpm;
+      build(SCENES[state.scene]);
+      Tone.Transport.start();
+    };
+    document.getElementById('stop').onclick=()=>Tone.Transport.stop();
+    document.getElementById('next').onclick=()=>{
+      state.scene=(state.scene+1)%SCENES.length;
+      build(SCENES[state.scene]);
+    };
+
+    document.getElementById('intensity').oninput=e=>{
+      state.intensity=parseFloat(e.target.value);
+      document.getElementById('vi').textContent=state.intensity.toFixed(2);
+    };
+    document.getElementById('melVol').oninput=e=>{
+      state.melVol=parseFloat(e.target.value);
+      melody.volume.value=Tone.gainToDb(state.melVol);
+      document.getElementById('vm').textContent=state.melVol.toFixed(2);
+    };
+  </script>
+</body>
+</html>
