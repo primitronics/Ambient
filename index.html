@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Ambient/IDM Live – GitHub Pages Single File</title>
+  <style>
+    :root{--bg:#0b0b0d;--panel:#141418;--border:#2a2a33;--text:#e7e7ee;--sub:#a3a3b0}
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Hiragino Sans","Noto Sans JP",sans-serif}
+    .wrap{max-width:980px;margin:24px auto;padding:16px}
+    .title{font-weight:700;font-size:18px;margin:0 0 8px}
+    .muted{color:var(--sub);font-size:12px}
+    .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+    .card{background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:16px;margin-bottom:12px}
+    button{background:#1e1e24;border:1px solid var(--border);color:#fff;padding:10px 14px;border-radius:12px;cursor:pointer}
+    button:hover{background:#25252d}
+    input[type=range]{width:min(320px,70vw)}
+    .kv{display:flex;align-items:center;gap:8px}
+    .val{font-size:12px;color:var(--sub);min-width:40px}
+    code{background:#1a1a22;border:1px solid var(--border);padding:2px 6px;border-radius:6px}
+    .footer{opacity:.7;font-size:12px}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <div class="title">Ambient/IDM Live – Single HTML</div>
+      <div class="muted">GitHub Pages そのままアップ可能。<span id="status">Ready</span></div>
+      <div class="row" style="margin-top:8px">
+        <button id="start">Start</button>
+        <button id="stop">Stop</button>
+        <button id="next">Next Scene</button>
+        <button id="rand">Tasteful Random</button>
+        <span class="muted" id="now">—</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="row kv"><span>Intensity</span><input type="range" min="0" max="1" step="0.01" id="intensity"><span class="val" id="vi"></span></div>
+      <div class="row kv"><span>Density</span><input type="range" min="0" max="1" step="0.01" id="density"><span class="val" id="vd"></span></div>
+      <div class="row kv"><span>Complexity</span><input type="range" min="0" max="1" step="0.01" id="complexity"><span class="val" id="vc"></span></div>
+      <div class="row kv"><span>Filter</span><input type="range" min="0" max="1" step="0.01" id="filter"><span class="val" id="vf"></span></div>
+      <div class="row kv"><span>Texture</span><input type="range" min="0" max="1" step="0.01" id="texture"><span class="val" id="vt"></span></div>
+      <div class="row kv"><span>Volume</span><input type="range" min="0" max="1" step="0.01" id="volume" value="0.9"><span class="val" id="vv"></span></div>
+      <div class="row kv"><span>BPM</span><input type="range" min="56" max="140" step="1" id="bpm"><span class="val" id="vb"></span></div>
+      <div class="muted" style="margin-top:6px">Tip: 音が出ない時はまず <b>Start</b> を押してから操作（ブラウザの自動再生制限）。</div>
+    </div>
+
+    <div class="card footer">
+      デプロイ方法: このファイルを <code>index.html</code> としてGitHubリポジトリ直下に置き、<b>Settings → Pages</b>で「Deploy from a branch」「branch: <code>main</code> / folder: <code>/root</code>」に設定。数十秒で公開URLが出ます。
+    </div>
+  </div>
+
+  <!-- No bundler required: CDN Tone.js -->
+  <script src="https://unpkg.com/tone@latest/build/Tone.js"></script>
+  <script>
+    // ------- Helpers -------
+    const clamp=(v,min,max)=>Math.min(max,Math.max(min,v));
+    const lerp=(a,b,t)=>a+(b-a)*t;
+    const r=(a,b)=>a+Math.random()*(b-a);
+
+    const scales={
+      aeolian:[0,2,3,5,7,8,10], dorian:[0,2,3,5,7,9,10], lydian:[0,2,4,6,7,9,11],
+      pentatonic:[0,3,5,7,10], mixolydian:[0,2,4,5,7,9,10]
+    };
+
+    const SCENES=[
+      {name:"Shinjuku Haze",desc:"soft pads + sparse IDM", bpm:84, scale:"aeolian", root:57, pad:{type:"am",rev:.7,fil:.55}, beat:{dens:.35,comp:.35,swing:.08}, tex:{bit:.1}, intensity:.35},
+      {name:"Neon Rain",desc:"glassy chords + micro-breaks", bpm:98, scale:"lydian", root:60, pad:{type:"basic",rev:.6,fil:.6}, beat:{dens:.55,comp:.6,swing:.14}, tex:{bit:.18}, intensity:.55},
+      {name:"Analog River",desc:"warm pads + rolling", bpm:106, scale:"mixolydian", root:62, pad:{type:"fm",rev:.7,fil:.52}, beat:{dens:.5,comp:.45,swing:.1}, tex:{bit:.12}, intensity:.5},
+      {name:"Kanshou",desc:"tape-eaten nocturne", bpm:60, scale:"aeolian", root:48, pad:{type:"am",rev:.95,fil:.35}, beat:{dens:.05,comp:.1,swing:.04}, tex:{bit:.22}, intensity:.12}
+    ];
+
+    const state={ scene:0, macros:{ intensity:.4, density:.35, complexity:.35, texture:.25, filter:.6, volume:.9 }, bpm:SCENES[0].bpm };
+
+    // ------- Audio Engine -------
+    let master, filter, rev, delay, bit, pad, kick, snare, hat, padPart, beatPart, hatPart;
+
+    function initEngine(){
+      master=new Tone.Gain(0.9).toDestination();
+      filter=new Tone.Filter(12000,"lowpass").connect(master);
+      rev=new Tone.Reverb({decay:8,wet:.3,preDelay:.05}).connect(filter);
+      delay=new Tone.PingPongDelay({delayTime:"8n",feedback:.3,wet:.2}).connect(rev);
+      bit=new Tone.BitCrusher({bits:8,wet:0}).connect(delay);
+    }
+
+    function makePad(type){
+      const env={attack:2.2,decay:.5,sustain:.6,release:3.5};
+      if(type==="am") return new Tone.PolySynth(Tone.AMSynth,{envelope:env,maxPolyphony:8,volume:-10}).connect(bit);
+      if(type==="fm") return new Tone.PolySynth(Tone.FMSynth,{envelope:env,maxPolyphony:8,volume:-10}).connect(bit);
+      return new Tone.PolySynth(Tone.Synth,{oscillator:{type:"triangle8"},envelope:env,maxPolyphony:8,volume:-10}).connect(bit);
+    }
+
+    function applyScene(sc){
+      Tone.Transport.bpm.rampTo(sc.bpm,.2);
+      filter.frequency.rampTo(lerp(1500,16000, sc.pad.fil*.6 + state.macros.filter*.4), .5);
+      rev.wet.rampTo(lerp(.1,.6, sc.pad.rev*.8 + state.macros.intensity*.2), .5);
+      delay.wet.rampTo(lerp(.05,.35, state.macros.texture), .5);
+      bit.wet.rampTo(lerp(0,.25,(sc.tex.bit||0)*.8 + state.macros.texture*.2), .5);
+      master.gain.rampTo(state.macros.volume,.2);
+    }
+
+    function build(sc){
+      if(padPart){ padPart.stop(); padPart.dispose(); }
+      if(beatPart){ beatPart.stop(); beatPart.dispose(); }
+      if(hatPart){ hatPart.stop(); hatPart.dispose(); }
+      if(pad){ pad.dispose(); }
+
+      pad=makePad(sc.pad.type);
+      kick=new Tone.MembraneSynth().connect(bit);
+      snare=new Tone.NoiseSynth({noise:{type:"pink"}, envelope:{attack:.001,decay:.15,sustain:0}}).connect(bit);
+      hat=new Tone.NoiseSynth({noise:{type:"white"}, envelope:{attack:.001,decay:.05,sustain:0}}).connect(bit);
+
+      const scale=scales[sc.scale];
+      const chord=[0,3,4,6].map(i=>scale[i%scale.length]);
+
+      padPart=new Tone.Part((time)=>{
+        const deg=chord[Math.floor(Math.random()*chord.length)];
+        const oct=Math.random()<.4?1:0;
+        const midi=sc.root+12*oct+deg;
+        const freq=440*Math.pow(2,(midi-69)/12);
+        pad.triggerAttackRelease(freq, lerp(.2,2.5,1-state.macros.intensity), time, lerp(.2,.7,state.macros.intensity));
+      }, []).start(0);
+
+      const steps=32, dens=clamp(sc.beat.dens*.6+state.macros.density*.4,0,1), comp=clamp(sc.beat.comp*.6+state.macros.complexity*.4,0,1);
+      beatPart=new Tone.Part((time,ev)=>{ const [_,t]=ev; if(t==='k') kick.triggerAttackRelease("C1","8n",time); if(t==='s') snare.triggerAttackRelease("8n",time); }, []).start(0);
+      for(let i=0;i<steps;i++){
+        const t=`0:${Math.floor(i/16)}:${i%16}`;
+        if(i%16===0 || (i%16===8 && Math.random()<.5+.3*dens)) beatPart.add([t,'k']);
+        if(Math.random()<.05+.25*dens) beatPart.add([t,'k']);
+        if(i%8===4 && Math.random()<.95) beatPart.add([t,'s']);
+        if(comp>.5 && Math.random()<comp-.5) beatPart.add([t,'s']);
+      }
+      beatPart.loop=true; beatPart.loopEnd="2m";
+
+      hatPart=new Tone.Part((time)=>{ hat.triggerAttackRelease("8n", time, lerp(.02,.15,dens)); }, []).start(0);
+      const hatDiv=comp>.6?16:comp>.3?8:4; const hatSteps=hatDiv===16?32:hatDiv===8?16:8;
+      for(let i=0;i<hatSteps;i++){
+        const pos=i*(16/hatSteps); const t=`0:${Math.floor(pos/16)}:${pos%16}`;
+        if(Math.random()<.35+.45*dens) hatPart.add(t);
+      }
+      hatPart.loop=true; hatPart.loopEnd="2m";
+    }
+
+    function setScene(idx){
+      state.scene=idx; const sc=SCENES[idx]; applyScene(sc); build(sc);
+      document.getElementById('now').textContent=`Current: ${sc.name} — ${sc.desc} | ${sc.bpm} BPM`;
+      document.getElementById('bpm').value=sc.bpm; document.getElementById('vb').textContent=sc.bpm;
+    }
+
+    function randomize(){
+      state.macros.intensity=clamp(r(.2,.8),0,1);
+      state.macros.density=clamp(r(.15,.7),0,1);
+      state.macros.complexity=clamp(r(.2,.8),0,1);
+      state.macros.texture=clamp(r(.1,.6),0,1);
+      state.macros.filter=clamp(r(.4,.9),0,1);
+      updateVals(); applyScene(SCENES[state.scene]);
+    }
+
+    const $=id=>document.getElementById(id);
+    function bind(id,key){
+      $(id).addEventListener('input',e=>{ state.macros[key]=parseFloat(e.target.value); $("v"+id[0]).textContent=state.macros[key].toFixed(2); applyScene(SCENES[state.scene]); });
+    }
+    function updateVals(){
+      ['vi','vd','vc','vf','vt','vv'].forEach((id,i)=>{ $(id).textContent=Object.values(state.macros)[i].toFixed(2); });
+      $('vb').textContent=$('bpm').value=state.bpm; $('volume').value=state.macros.volume;
+    }
+
+    // ------- Event wiring -------
+    window.addEventListener('error',e=>{ const s=$('status'); if(s) s.textContent='Error: '+(e.message||''); });
+
+    $('start').addEventListener('click', async ()=>{
+      try {
+        if(!master) initEngine();
+        await Tone.start();
+        Tone.Transport.start();
+        setScene(state.scene);
+        $('status').textContent='Running';
+      } catch(err){ $('status').textContent='Audio start failed'; console.error(err); }
+    });
+    $('stop').addEventListener('click', ()=>{ Tone.Transport.stop(); $('status').textContent='Stopped'; });
+    $('next').addEventListener('click', ()=>{ const n=(state.scene+1)%SCENES.length; setScene(n); });
+    $('rand').addEventListener('click', randomize);
+
+    [['intensity','intensity'],['density','density'],['complexity','complexity'],['filter','filter'],['texture','texture'],['volume','volume']].forEach(([id,key])=>bind(id,key));
+    $('bpm').addEventListener('input',e=>{ state.bpm=parseInt(e.target.value,10); Tone.Transport.bpm.rampTo(state.bpm,.2); $('vb').textContent=state.bpm; });
+
+    // init UI numbers
+    state.bpm=SCENES[0].bpm; updateVals();
+    $('now').textContent='Ready — Press Start';
+  </script>
+</body>
+</html>
